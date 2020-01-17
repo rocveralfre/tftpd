@@ -60,9 +60,9 @@ func ack(pc *net.UDPConn, block uint16, session *Session) bool {
 		session.CurrentOffset = session.CurrentOffset + 1
 		n, err := session.FileReader.Read(session.CurrentChunk)
 		fmt.Println("READ: ", n, " ERR:", err)
-		var response []byte = []byte{0x00, 0x03, 0x00}
-		offset := make([]byte, 8)
-		binary.BigEndian.PutUint64(offset, uint64(session.CurrentOffset))
+		var response []byte = []byte{0x00, 0x03}
+		offset := make([]byte, 2)
+		binary.BigEndian.PutUint16(offset, uint16(session.CurrentOffset))
 		response = append(response, offset...)
 		response = append(response, session.CurrentChunk[:n]...)
 		pc.WriteToUDP(response, session.Peer)
