@@ -7,11 +7,16 @@ import (
 )
 
 func main() {
+	var listenPort int = 69
+	// var sessions []tftp.TftpSession = make([]tftp.TftpSession, 5)
+
+	log.Println("tftpd: starting on port: ", listenPort)
 	// listen to incoming udp packets
-	pc, err := net.ListenPacket("udp", ":1053")
+	pc, err := net.ListenPacket("udp", ":69")
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Println("tftpd: socket correctly open")
 	defer pc.Close()
 
 	for {
