@@ -1,16 +1,17 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"tftpd/internal/tftp"
 )
 
 func main() {
-	var addr net.UDPAddr = net.UDPAddr{Port: 69, IP: net.ParseIP("127.0.0.1")}
-	var sessions map[string]tftp.Session = make(map[string]tftp.Session)
-
+	addr := net.UDPAddr{Port: 69, IP: net.ParseIP("127.0.0.1")}
+	sessions := make(map[string]chan tftp.UDPPacket)
+	control := make(chan string, 20)
+	input := make(chan tftp.UDPPacket, 20)
+	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.Println("tftpd: starting on port: ", addr)
 	// listen to incoming udp packets
 	udpConn, err := net.ListenUDP("udp", &addr)
@@ -19,27 +20,44 @@ func main() {
 	}
 	log.Println("tftpd: socket correctly open")
 	defer udpConn.Close()
-
+	go readUDP(udpConn, input)
 	for {
-		buf := make([]byte, 1024)
-		n, remote, err := udpConn.ReadFromUDP(buf)
-		if err != nil {
-			continue
+		select {
+		case udpPacket := <-input:
+			handleRequest(udpConn, udpPacket, control, &sessions)
+		case dead := <-control:
+			log.Println("DELETING: ", dead)
+			delete(sessions, dead)
 		}
-		go handleRequest(udpConn, remote, buf[:n], &sessions)
 	}
 
 }
 
-func handleRequest(pc *net.UDPConn, addr *net.UDPAddr, buf []byte, sessions *map[string]tftp.Session) {
+func readUDP(udpConn *net.UDPConn, input chan tftp.UDPPacket) {
+	buf := make([]byte, 1024)
+	for {
+		n, remote, err := udpConn.ReadFromUDP(buf)
+		if err != nil {
+			continue
+		}
+		input <- tftp.UDPPacket{Socket: udpConn, Peer: remote, Body: buf, BodySize: n}
+	}
+}
+
+func handleRequest(pc *net.UDPConn, udpPacket tftp.UDPPacket, controlChannel chan string, sessions *map[string]chan tftp.UDPPacket) {
+	addr := udpPacket.Peer
+	buf := udpPacket.Body[:udpPacket.BodySize]
 	currentSession, presence := (*sessions)[addr.IP.String()]
+
 	if presence == true {
-		fmt.Println("Have Session for: ", addr)
-		currentSession.HandleRequest(pc, buf)
+		// log.Println("Have Session for: ", addr)
+		currentSession <- tftp.UDPPacket{Socket: pc, Peer: addr, Body: buf}
 	} else {
-		fmt.Println("Missing Sessions for: ", addr, "\nRequested: \n", buf)
-		var newSession *tftp.Session = tftp.CreateSession(addr)
+		// log.Println("Missing Sessions for: ", addr, "\nRequested: \n", buf)
+		newSession := &tftp.Session{Peer: addr}
 		newSession.HandleRequest(pc, buf)
-		(*sessions)[addr.IP.String()] = (*newSession)
+		channel := make(chan tftp.UDPPacket, 10)
+		(*sessions)[addr.IP.String()] = channel
+		go tftp.RunSession(addr, channel, controlChannel, newSession)
 	}
 }

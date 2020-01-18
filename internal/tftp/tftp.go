@@ -1,86 +1,75 @@
 package tftp
 
 import (
+	"bytes"
 	"encoding/binary"
-	"fmt"
+	"log"
+	"math/rand"
 	"net"
 	"os"
-	"time"
 )
 
 //Session :
 //Due to the stateless nature of UDP
 //We have to create a State using this struct
 type Session struct {
-	Peer          *net.UDPAddr
-	FileName      string
-	CurrentOffset int64
-	CurrentChunk  []byte
-	FileReader    *os.File
-	TotalChunks   int64
-	FileSize      int64
-	Mode          string
-	ReqType       int
+	id                 int
+	Peer               *net.UDPAddr
+	FileName           string
+	CurrentChunkOffset int64
+	CurrentChunk       []byte
+	CurrentChunkSize   int
+	FileReader         *os.File
+	TotalChunks        int64
+	FileSize           int64
+	Mode               string
+	ReqType            int
 }
 
-// CreateSession : returns a new valid object
-func CreateSession(peer *net.UDPAddr) *Session {
-	return &Session{Peer: peer, ReqType: 0}
-}
-
-// HandleRequest : handles binary requests from peers
-func (session *Session) HandleRequest(pc *net.UDPConn, message []byte) {
-	if len(message) > 2 {
-		var opCode uint16 = binary.BigEndian.Uint16(message[:2])
-		var payload []byte
-		switch opCode {
-		case 0x01:
-			fmt.Println("READ REQUEST")
-			session.FileName, payload = getFileName(message[2:])
-			session.Mode = getMode(payload)
-			session.ReqType = 1
-			session.CurrentOffset = 0
-			fmt.Println("REQUESTED:", session.FileName, "\nMode:", session.Mode)
-			readRequest(pc, session)
-		case 0x02:
-			fmt.Println("WRITE REQUEST")
-		case 0x04:
-			if ack(pc, binary.BigEndian.Uint16(message[2:]), session) {
-				session.FileReader.Close()
-			}
-		default:
-			fmt.Println("Unknown OP Code:", opCode, "\nBody:", message)
+// RunSession : we handle as process
+func RunSession(peer *net.UDPAddr, inputChannel chan UDPPacket, control chan string, session *Session) {
+	select {
+	case newPacket := <-inputChannel:
+		if !session.HandleRequest(newPacket.Socket, newPacket.Body) {
+			RunSession(peer, inputChannel, control, session)
+		} else {
+			control <- session.Peer.IP.String()
 		}
 	}
 }
 
-func ack(pc *net.UDPConn, block uint16, session *Session) bool {
-	if session.ReqType == 1 && session.CurrentOffset == int64(block) {
-
-		session.CurrentOffset = session.CurrentOffset + 1
-		n, err := session.FileReader.Read(session.CurrentChunk)
-		fmt.Println("READ: ", n, " ERR:", err)
-		var response []byte = []byte{0x00, 0x03}
-		offset := make([]byte, 2)
-		binary.BigEndian.PutUint16(offset, uint16(session.CurrentOffset))
-		response = append(response, offset...)
-		response = append(response, session.CurrentChunk[:n]...)
-		pc.WriteToUDP(response, session.Peer)
-		time.Sleep(10000)
-		if n < 512 {
-			fmt.Println("DONE: 100%")
-			return true
-		} else {
-			percentage := (session.CurrentOffset / session.TotalChunks) * 100
-			fmt.Println(percentage, "%")
+// HandleRequest : handles binary requests from peers
+func (session *Session) HandleRequest(pc *net.UDPConn, message []byte) bool {
+	if len(message) > 2 {
+		opCode := binary.BigEndian.Uint16(message[:2])
+		var payload []byte
+		switch opCode {
+		case 0x01:
+			log.Println("[", session.id, "] Read Request")
+			session.FileName, payload = getFileName(message[2:])
+			session.Mode = getMode(payload)
+			session.ReqType = 1
+			session.CurrentChunkOffset = 0
+			session.id = rand.Intn(100)
+			log.Println("REQUESTED:", session.FileName, "\nMode:", session.Mode)
+			readRequest(pc, session)
 			return false
+		case 0x02:
+			log.Println("WRITE REQUEST")
+			return false
+		case 0x04:
+			log.Println("[", session.id, "] ACK")
+			return ack(pc, binary.BigEndian.Uint16(message[2:]), session)
+		default:
+			log.Println("Unknown OP Code:", opCode, "\nBody:", message)
 		}
 	}
 	return false
 }
 
 func readRequest(pc *net.UDPConn, session *Session) {
-	if session.ReqType == 1 && session.CurrentOffset == 0 {
+	// log.Println("Session ID: ", session.id)
+	if session.ReqType == 1 && session.CurrentChunkOffset == 0 {
 		if file, err := os.Stat(session.FileName); err == nil {
 			session.FileSize = file.Size()
 			if file.Size()%512 == 0 {
@@ -88,37 +77,95 @@ func readRequest(pc *net.UDPConn, session *Session) {
 			} else {
 				session.TotalChunks = (file.Size() / 512) + 1
 			}
-			fmt.Println("File Exists", "\nSize: ", session.FileSize, "\nTotalChunks: ", session.TotalChunks)
+			log.Println("File Exists", "\nSize: ", session.FileSize, "\nTotalChunks: ", session.TotalChunks)
 			file, err := os.Open(session.FileName)
 			if err != nil {
-				var response []byte = []byte{0x00, 0x05, 0x00, 0x01}
-				response = append(response, "FileNotFound"...)
-				response = append(response, 0x00)
-				pc.WriteToUDP(response, session.Peer)
+				sendError(1, "File not found.", pc, session)
 			} else {
 				session.CurrentChunk = make([]byte, 512)
 				session.FileReader = file
-				session.CurrentOffset = session.CurrentOffset + 1
-				n, err := file.Read(session.CurrentChunk)
-				fmt.Println("READ: ", n, " ERR:", err)
-				var response []byte = []byte{0x00, 0x03, 0x00, 0x01}
-				response = append(response, session.CurrentChunk[:n]...)
-				pc.WriteToUDP(response, session.Peer)
-				if n < 512 {
-					fmt.Println("DONE: 100%")
-				} else {
-					percentage := (session.CurrentOffset / session.TotalChunks) * 100
-					fmt.Println(percentage, "%")
-				}
+				sendNextChunk(pc, session)
 			}
 
 		} else {
-			var response []byte = []byte{0x00, 0x05, 0x00, 0x01}
-			response = append(response, "FileNotFound"...)
-			response = append(response, 0x00)
-			pc.WriteToUDP(response, session.Peer)
+			sendError(1, "File not found.", pc, session)
 		}
 	}
+}
+
+func ack(pc *net.UDPConn, block uint16, session *Session) bool {
+	// log.Println("ACK Block ", uint64(block))
+	// log.Println("ReqType ", session.ReqType)
+	// log.Println("CurrentChunkOffset ", session.CurrentChunkOffset)
+	// log.Println("CurrentChunkOffset ", int64(block) == session.CurrentChunkOffset)
+	// log.Println("Total Chunks ", session.TotalChunks)
+
+	if session.ReqType == 1 && session.CurrentChunkOffset == int64(block) &&
+		session.CurrentChunkOffset != session.TotalChunks {
+		sendNextChunk(pc, session)
+		return false
+	} else if int64(block) == (session.CurrentChunkOffset - 1) {
+		log.Println("Peer acknowledged old block, resending...")
+		sendCurrentChunk(pc, session)
+		return false
+	} else {
+		log.Println("Transfer successful.")
+		session.FileReader.Close()
+		return true
+	}
+}
+
+func sendCurrentChunk(socket *net.UDPConn, session *Session) {
+	// log.Println("Session ID: ", session.id)
+	log.Println("[RESEND] Current chunk:", session.CurrentChunkOffset)
+	response := new(bytes.Buffer)
+	binary.Write(response, binary.BigEndian, []byte{0x00, 0x03})
+	binary.Write(response, binary.BigEndian, uint16(session.CurrentChunkOffset))
+	binary.Write(response, binary.BigEndian, session.CurrentChunk[:session.CurrentChunkSize])
+	log.Println("[RESEND] About to send ", len(response.Bytes()), "bytes to peer")
+	socket.WriteToUDP(response.Bytes(), session.Peer)
+	if session.CurrentChunkSize < 512 {
+		log.Println("DONE: 100%")
+	} else {
+		percentage := (session.CurrentChunkOffset / session.TotalChunks) * 100
+		log.Println(percentage, "%")
+	}
+}
+
+func sendNextChunk(socket *net.UDPConn, session *Session) {
+	// log.Println("Session ID: ", session.id)
+	log.Println("[SEND] Current chunk:", session.CurrentChunkOffset)
+	session.CurrentChunkOffset++
+	n, err := session.FileReader.Read(session.CurrentChunk)
+	session.CurrentChunkSize = n
+	log.Println("[SEND] READ: ", n, " ERR:", err)
+	response := []byte{0x00, 0x03}
+	binaryChunk := make([]byte, 2)
+	binary.BigEndian.PutUint16(binaryChunk, uint16(session.CurrentChunkOffset))
+	response = append(response, binaryChunk...)
+	response = append(response, session.CurrentChunk[:n]...)
+	log.Println("[SEND] About to send ", len(response), "bytes to peer")
+	log.Println("[SEND] Chunk ", session.CurrentChunkOffset, " sent")
+	socket.WriteToUDP(response, session.Peer)
+	if n < 512 {
+		log.Println("[SEND] DONE: 100%")
+	} else {
+		percentage := (session.CurrentChunkOffset / session.TotalChunks) * 100
+		log.Println(percentage, "%")
+	}
+}
+
+func sendError(errorCode int, description string, socket *net.UDPConn, session *Session) {
+	log.Println("Session ID: ", session.id)
+	response := []byte{0x00, 0x05}
+	binaryCode := make([]byte, 2)
+	binary.BigEndian.PutUint16(binaryCode, uint16(errorCode))
+	response = append(response, binaryCode...)
+	response = append(response, description...)
+	response = append(response, 0x00)
+	log.Println("Returning:", response)
+	socket.WriteToUDP(response, session.Peer)
+
 }
 
 func getFileName(binary []byte) (string, []byte) {
