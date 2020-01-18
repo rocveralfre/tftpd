@@ -136,6 +136,9 @@ func sendNextChunk(socket *net.UDPConn, session *Session) {
 	// log.Println("Session ID: ", session.id)
 	log.Println("[SEND] Current chunk:", session.CurrentChunkOffset)
 	session.CurrentChunkOffset++
+	// TODO:
+	// use binary.Write in order to avoid this madness of
+	// creating slices by hand
 	n, err := session.FileReader.Read(session.CurrentChunk)
 	session.CurrentChunkSize = n
 	log.Println("[SEND] READ: ", n, " ERR:", err)
@@ -157,6 +160,9 @@ func sendNextChunk(socket *net.UDPConn, session *Session) {
 
 func sendError(errorCode int, description string, socket *net.UDPConn, session *Session) {
 	log.Println("Session ID: ", session.id)
+	// TODO:
+	// use binary.Write in order to avoid this madness of
+	// creating slices by hand
 	response := []byte{0x00, 0x05}
 	binaryCode := make([]byte, 2)
 	binary.BigEndian.PutUint16(binaryCode, uint16(errorCode))
@@ -169,7 +175,7 @@ func sendError(errorCode int, description string, socket *net.UDPConn, session *
 }
 
 func getFileName(binary []byte) (string, []byte) {
-	var count int = 0
+	var count int
 
 	for binary[count] != 0x00 {
 		count++
